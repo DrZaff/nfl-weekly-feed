@@ -29,7 +29,7 @@ def main():
     season = current_season()
     df = nfl.load_player_stats([season], summary_level="week")  # Polars DataFrame
 
-    # Prefer REG season rows when present (fixed: starts_with)
+    # Prefer REG season rows when present
     if "season_type" in df.columns:
         reg = df.filter(
             pl.col("season_type")
@@ -89,7 +89,7 @@ def main():
     df = df.with_columns([
         strexpr(df, ["player_id", "gsis_id", "pfr_player_id", "nflverse_id"]).alias("player_id"),
         strexpr(df, ["player", "player_name", "name"]).alias("player"),
-        strexpr(df, ["recent_team", "team,team_abbr", "team_abbr", "player_team"]).alias("team"),
+        strexpr(df, ["recent_team", "team", "team_abbr", "player_team"]).alias("team"),
         strexpr(df, ["position", "pos"]).alias("position"),
     ])
 
@@ -101,21 +101,21 @@ def main():
         df_to_date
         .group_by(["player_id", "player", "team", "position"])
         .agg([
-            pl.count().alias("games"),
-            pl.sum(pass_yds).alias("pass_yds"),
-            pl.sum(pass_td).alias("pass_td"),
-            pl.sum(interceptions).alias("int"),
-            pl.sum(rush_yds).alias("rush_yds"),
-            pl.sum(rush_td).alias("rush_td"),
-            pl.sum(rec).alias("receptions"),
-            pl.sum(rec_yds).alias("rec_yds"),
-            pl.sum(rec_td).alias("rec_td"),
-            pl.sum(fumbles_lost).alias("fumbles_lost"),
-            pl.sum(two_pt).alias("two_pt"),
-            pl.sum(pl.col("ffpts_half_ppr")).alias("ffpts_half_ppr"),
+            pl.len().alias("games"),
+            pass_yds.sum().alias("pass_yds"),
+            pass_td.sum().alias("pass_td"),
+            interceptions.sum().alias("int"),
+            rush_yds.sum().alias("rush_yds"),
+            rush_td.sum().alias("rush_td"),
+            rec.sum().alias("receptions"),
+            rec_yds.sum().alias("rec_yds"),
+            rec_td.sum().alias("rec_td"),
+            fumbles_lost.sum().alias("fumbles_lost"),
+            two_pt.sum().alias("two_pt"),
+            pl.col("ffpts_half_ppr").sum().alias("ffpts_half_ppr"),
         ])
         .with_columns((pl.col("ffpts_half_ppr") / pl.col("games")).alias("ffpts_per_game"))
-        .sort(["ffpts_half_ppr"], descending=True)
+        .sort("ffpts_half_ppr", descending=True)
     )
     with open("season_totals.json", "w") as f:
         json.dump(season_totals.to_dicts(), f)
