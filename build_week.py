@@ -1,58 +1,68 @@
-# build_week.py
-# Fetch weekly NFL player stats from nflverse and publish "latest_week.json" and "meta.json".
-# Beginner-safe: no env vars; works on free GitHub Actions.
-
-import datetime as dt
-import io
-import json
-import sys
-import requests
-import pandas as pd
+# build_week.py (robust fetcher)
+import datetime as dt, io, json, sys, gzip, requests, pandas as pd
 
 def current_season(today=None):
-    """NFL season is labeled by the year it starts (e.g., 2025 season runs into 2026)."""
     today = today or dt.date.today()
+    # NFL season is labeled by the year it *starts* (Sept–Dec into next year)
     return today.year if today.month >= 9 else today.year - 1
 
+def read_csv_maybe_gz(content: bytes, url: str) -> pd.DataFrame:
+    """Read CSV; if the file is gzipped, decompress and read."""
+    try:
+        return pd.read_csv(io.StringIO(content.decode("utf-8")))
+    except UnicodeDecodeError:
+        try:
+            text = gzip.decompress(content).decode("utf-8")
+            return pd.read_csv(io.StringIO(text))
+        except Exception as e:
+            raise RuntimeError(f"Could not parse CSV from {url}: {e}")
+
 def fetch_weekly_df(season: int) -> pd.DataFrame:
-    # nflverse weekly player stats (CSV) hosted on GitHub releases.
-    # Example path pattern is documented/linked across nflverse resources.
-    url = f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_{season}.csv"
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.text))
+    # Try the known nflverse release name variants for weekly player stats
+    candidates = [
+        f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/player_stats_{season}.csv",
+        f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/player_stats_{season}.csv.gz",
+        f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_{season}.csv",
+        f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_{season}.csv.gz",
+    ]
+    last_err = None
+    for url in candidates:
+        try:
+            print(f"Trying {url}")
+            r = requests.get(url, timeout=60)
+            if r.status_code != 200:
+                print(f"...status {r.status_code}")
+                continue
+            df = read_csv_maybe_gz(r.content, url)
+            print(f"Fetched from {url} with shape {df.shape}")
+            return df
+        except Exception as e:
+            last_err = e
+            print(f"Failed {url}: {e}", file=sys.stderr)
+    raise SystemExit(f"Could not fetch weekly stats for season {season}. Last error: {last_err}")
 
 def main():
     season = current_season()
     df = fetch_weekly_df(season)
 
-    # Prefer regular season when available; fall back gracefully (preseason/postseason).
+    # Prefer regular season rows if present
+    src = df
     if "season_type" in df.columns:
-        reg_df = df[df["season_type"].astype(str).str.upper().str.startswith("REG")]
-        week_source = reg_df if len(reg_df) else df
-    else:
-        week_source = df
+        reg = df[df["season_type"].astype(str).str.upper().str.startswith("REG")]
+        if len(reg):
+            src = reg
 
-    if "week" not in week_source.columns:
-        print("No 'week' column found in data. Exiting.", file=sys.stderr)
-        sys.exit(1)
+    if "week" not in src.columns:
+        raise SystemExit("No 'week' column in data.")
 
-    latest_week = int(week_source["week"].max())
-    week_df = week_source[week_source["week"] == latest_week].copy()
+    latest_week = int(src["week"].max())
+    week_df = src[src["week"] == latest_week].copy()
 
-    # Keep everything (simple for beginners). Your GPT can pick the columns it wants.
-    # If you later want a slimmer file, you can select a subset of columns here.
-
-    # Write outputs
     week_df.to_json("latest_week.json", orient="records")
-    meta = {"season": int(season), "week": int(latest_week), "rows": int(len(week_df))}
     with open("meta.json", "w") as f:
-        json.dump(meta, f)
-
-    # Also keep a historical copy (optional but handy)
+        json.dump({"season": int(season), "week": int(latest_week), "rows": int(len(week_df))}, f)
     week_df.to_json(f"week_{season}_{latest_week}.json", orient="records")
-
-    print(f"Wrote latest_week.json and meta.json for season {season}, week {latest_week} with {len(week_df)} rows.")
+    print(f"Wrote latest_week.json/meta.json for S{season} W{latest_week} ({len(week_df)} rows).")
 
 if __name__ == "__main__":
     main()
