@@ -25,11 +25,11 @@ jobs:
 
       - name: Build latest week files
         run: python build_week.py
-
+        
       - name: Commit & push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add latest_week.json meta.json week_*.json || true
-          git commit -m "Update weekly feed" || echo "Nothing to commit"
+          git add latest_week.json meta.json week_*.json season_totals.json season_top10.json || true
+          git commit -m "Update weekly & season feeds" || echo "Nothing to commit"
           git push
