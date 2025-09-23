@@ -1,4 +1,4 @@
-# build_week.py — weekly + cumulative season outputs (Polars-only)
+# build_week.py — weekly + season totals (Polars-only; JSON via json.dump)
 import datetime as dt
 import json
 import polars as pl
@@ -7,18 +7,15 @@ import nflreadpy as nfl  # loader for nflverse data
 # ---------- helpers ----------
 def current_season(today=None):
     today = today or dt.date.today()
-    # NFL season label = year it starts (Sept–Dec into next year)
     return today.year if today.month >= 9 else today.year - 1
 
 def colexpr(df: pl.DataFrame, names: list[str], default: float = 0.0) -> pl.Expr:
-    """Return the first matching column as Float; otherwise a 0 literal."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Float64, strict=False)
     return pl.lit(default)
 
 def strexpr(df: pl.DataFrame, names: list[str], default: str = "") -> pl.Expr:
-    """Return first matching string column; otherwise empty string literal."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Utf8, strict=False)
@@ -31,7 +28,7 @@ def main():
 
     # Prefer REG season rows when present
     if "season_type" in df.columns:
-        reg = df.filter(pl.col("season_type").str.to_uppercase().str.starts_with("REG"))
+        reg = df.filter(pl.col("season_type").str.to_uppercase().str.startswith("REG"))
         if reg.height > 0:
             df = reg
 
@@ -42,10 +39,12 @@ def main():
 
     # ---- WEEKLY OUTPUT (existing behavior) ----
     week_df = df.filter(pl.col("week") == latest_week)
-    week_df.write_json("latest_week.json", row_oriented=True)
+    with open("latest_week.json", "w") as f:
+        json.dump(week_df.to_dicts(), f)
     with open("meta.json", "w") as f:
         json.dump({"season": int(season), "week": latest_week, "rows": int(week_df.height)}, f)
-    week_df.write_json(f"week_{season}_{latest_week}.json", row_oriented=True)
+    with open(f"week_{season}_{latest_week}.json", "w") as f:
+        json.dump(week_df.to_dicts(), f)
 
     # ---- Add fantasy scoring (0.5 PPR) to every weekly row ----
     pass_yds = colexpr(df, ["pass_yds", "passing_yards", "pass_yards"])
@@ -61,7 +60,6 @@ def main():
 
     fumbles_lost = colexpr(df, ["fumbles_lost", "fum_lost"])
 
-    # 2-pt conversions (sum any that exist)
     two_pt = (
         colexpr(df, ["two_pt", "two_point_conversions"])
         + colexpr(df, ["two_pt_pass", "two_point_pass"])
@@ -76,7 +74,6 @@ def main():
         + 2 * two_pt
         - 2 * fumbles_lost
     )
-
     df = df.with_columns(ff_expr.alias("ffpts_half_ppr"))
 
     # ---- Normalize ID/name/team/pos columns for grouping ----
@@ -87,7 +84,7 @@ def main():
         strexpr(df, ["position", "pos"]).alias("position"),
     ])
 
-    # Keep only rows up to latest_week (defensive if preseason/postseason present)
+    # Keep only rows up to latest_week
     df_to_date = df.filter(pl.col("week") <= latest_week)
 
     # ---- CUMULATIVE SEASON TOTALS ----
@@ -108,13 +105,11 @@ def main():
             pl.sum(two_pt).alias("two_pt"),
             pl.sum(pl.col("ffpts_half_ppr")).alias("ffpts_half_ppr"),
         ])
-        .with_columns([
-            (pl.col("ffpts_half_ppr") / pl.col("games")).alias("ffpts_per_game")
-        ])
+        .with_columns((pl.col("ffpts_half_ppr") / pl.col("games")).alias("ffpts_per_game"))
         .sort(["ffpts_half_ppr"], descending=True)
     )
-
-    season_totals.write_json("season_totals.json", row_oriented=True)
+    with open("season_totals.json", "w") as f:
+        json.dump(season_totals.to_dicts(), f)
 
     # ---- Top-10 by position (by FFPTS per game) ----
     top10 = {}
