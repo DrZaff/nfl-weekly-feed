@@ -11,14 +11,14 @@ def current_season(today=None):
     return today.year if today.month >= 9 else today.year - 1
 
 def colexpr(df: pl.DataFrame, names: list[str], default: float = 0.0) -> pl.Expr:
-    """Return the first matching numeric column as Float; otherwise 0."""
+    """Return the first matching numeric column as Float; otherwise 0 literal."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Float64, strict=False)
     return pl.lit(default)
 
 def strexpr(df: pl.DataFrame, names: list[str], default: str = "") -> pl.Expr:
-    """Return the first matching string column; otherwise empty string."""
+    """Return the first matching string column; otherwise empty-string literal."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Utf8, strict=False)
@@ -54,7 +54,7 @@ def main():
     with open(f"week_{season}_{latest_week}.json", "w") as f:
         json.dump(week_df.to_dicts(), f)
 
-    # ---- Half-PPR fantasy scoring added to every weekly row ----
+    # ---- Half-PPR fantasy scoring expression added to every weekly row ----
     pass_yds = colexpr(df, ["pass_yds", "passing_yards", "pass_yards"])
     pass_td  = colexpr(df, ["pass_td", "passing_tds"])
     interceptions = colexpr(df, ["int", "interceptions", "interceptions_thrown"])
@@ -96,22 +96,36 @@ def main():
     # Keep only rows up to latest_week
     df_to_date = df.filter(pl.col("week") <= latest_week)
 
+    # ---- STANDARDIZE NUMERIC COLUMNS (turn literals into real columns) ----
+    df_std = df_to_date.with_columns([
+        pass_yds.alias("_pass_yds"),
+        pass_td.alias("_pass_td"),
+        interceptions.alias("_int"),
+        rush_yds.alias("_rush_yds"),
+        rush_td.alias("_rush_td"),
+        rec.alias("_receptions"),
+        rec_yds.alias("_rec_yds"),
+        rec_td.alias("_rec_td"),
+        fumbles_lost.alias("_fumbles_lost"),
+        two_pt.alias("_two_pt"),
+    ])
+
     # ---- CUMULATIVE SEASON TOTALS ----
     season_totals = (
-        df_to_date
+        df_std
         .group_by(["player_id", "player", "team", "position"])
         .agg([
             pl.len().alias("games"),
-            pass_yds.sum().alias("pass_yds"),
-            pass_td.sum().alias("pass_td"),
-            interceptions.sum().alias("int"),
-            rush_yds.sum().alias("rush_yds"),
-            rush_td.sum().alias("rush_td"),
-            rec.sum().alias("receptions"),
-            rec_yds.sum().alias("rec_yds"),
-            rec_td.sum().alias("rec_td"),
-            fumbles_lost.sum().alias("fumbles_lost"),
-            two_pt.sum().alias("two_pt"),
+            pl.col("_pass_yds").sum().alias("pass_yds"),
+            pl.col("_pass_td").sum().alias("pass_td"),
+            pl.col("_int").sum().alias("int"),
+            pl.col("_rush_yds").sum().alias("rush_yds"),
+            pl.col("_rush_td").sum().alias("rush_td"),
+            pl.col("_receptions").sum().alias("receptions"),
+            pl.col("_rec_yds").sum().alias("rec_yds"),
+            pl.col("_rec_td").sum().alias("rec_td"),
+            pl.col("_fumbles_lost").sum().alias("fumbles_lost"),
+            pl.col("_two_pt").sum().alias("two_pt"),
             pl.col("ffpts_half_ppr").sum().alias("ffpts_half_ppr"),
         ])
         .with_columns((pl.col("ffpts_half_ppr") / pl.col("games")).alias("ffpts_per_game"))
