@@ -7,15 +7,18 @@ import nflreadpy as nfl  # loader for nflverse data
 # ---------- helpers ----------
 def current_season(today=None):
     today = today or dt.date.today()
+    # NFL season label = year it starts (Sept–Dec into next year)
     return today.year if today.month >= 9 else today.year - 1
 
 def colexpr(df: pl.DataFrame, names: list[str], default: float = 0.0) -> pl.Expr:
+    """Return the first matching numeric column as Float; otherwise 0."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Float64, strict=False)
     return pl.lit(default)
 
 def strexpr(df: pl.DataFrame, names: list[str], default: str = "") -> pl.Expr:
+    """Return the first matching string column; otherwise empty string."""
     for n in names:
         if n in df.columns:
             return pl.col(n).cast(pl.Utf8, strict=False)
@@ -24,11 +27,16 @@ def strexpr(df: pl.DataFrame, names: list[str], default: str = "") -> pl.Expr:
 # ---------- main ----------
 def main():
     season = current_season()
-    df = nfl.load_player_stats([season], summary_level="week")  # Polars DF
+    df = nfl.load_player_stats([season], summary_level="week")  # Polars DataFrame
 
-    # Prefer REG season rows when present
+    # Prefer REG season rows when present (fixed: starts_with)
     if "season_type" in df.columns:
-        reg = df.filter(pl.col("season_type").str.to_uppercase().str.startswith("REG"))
+        reg = df.filter(
+            pl.col("season_type")
+              .cast(pl.Utf8, strict=False)
+              .str.to_uppercase()
+              .str.starts_with("REG")
+        )
         if reg.height > 0:
             df = reg
 
@@ -37,7 +45,7 @@ def main():
         raise SystemExit("No 'week' column in data.")
     latest_week = int(df.select(pl.col("week").max()).item())
 
-    # ---- WEEKLY OUTPUT (existing behavior) ----
+    # ---- WEEKLY OUTPUT ----
     week_df = df.filter(pl.col("week") == latest_week)
     with open("latest_week.json", "w") as f:
         json.dump(week_df.to_dicts(), f)
@@ -46,7 +54,7 @@ def main():
     with open(f"week_{season}_{latest_week}.json", "w") as f:
         json.dump(week_df.to_dicts(), f)
 
-    # ---- Add fantasy scoring (0.5 PPR) to every weekly row ----
+    # ---- Half-PPR fantasy scoring added to every weekly row ----
     pass_yds = colexpr(df, ["pass_yds", "passing_yards", "pass_yards"])
     pass_td  = colexpr(df, ["pass_td", "passing_tds"])
     interceptions = colexpr(df, ["int", "interceptions", "interceptions_thrown"])
@@ -60,6 +68,7 @@ def main():
 
     fumbles_lost = colexpr(df, ["fumbles_lost", "fum_lost"])
 
+    # 2-pt conversions (sum whichever columns exist)
     two_pt = (
         colexpr(df, ["two_pt", "two_point_conversions"])
         + colexpr(df, ["two_pt_pass", "two_point_pass"])
@@ -76,11 +85,11 @@ def main():
     )
     df = df.with_columns(ff_expr.alias("ffpts_half_ppr"))
 
-    # ---- Normalize ID/name/team/pos columns for grouping ----
+    # ---- Normalize ID/name/team/position for grouping ----
     df = df.with_columns([
         strexpr(df, ["player_id", "gsis_id", "pfr_player_id", "nflverse_id"]).alias("player_id"),
         strexpr(df, ["player", "player_name", "name"]).alias("player"),
-        strexpr(df, ["recent_team", "team", "team_abbr", "player_team"]).alias("team"),
+        strexpr(df, ["recent_team", "team,team_abbr", "team_abbr", "player_team"]).alias("team"),
         strexpr(df, ["position", "pos"]).alias("position"),
     ])
 
