@@ -1,52 +1,88 @@
 name: Build & Publish Shards
+
 on:
   workflow_dispatch:
     inputs:
-      season:
-        description: "Season (e.g., 2025)"
-        required: true
-        default: "2025"
-      week:
-        description: "Week number (e.g., 3)"
-        required: true
-        default: "3"
+      season:  { description: "Season", default: "2025", required: true }
+      week:    { description: "Week (e.g., 3)", default: "3", required: true }
       raw_season_path:
         description: "Path to season totals JSON"
-        required: true
         default: "raw/season_totals_2025.json"
-      raw_weekly_path:
-        description: "Path to weekly usage JSON"
         required: true
-        default: "raw/weekly_usage_2025_w03.json"
-
-  schedule:
-    - cron: "0 9 * * TUE"   # optional: auto-run Tuesdays 9:00 UTC
+      raw_weekly_path:
+        description: "Weekly usage JSON (leave blank to auto-create)"
+        default: ""
+        required: false
+      fallback_weekly_path:
+        description: "Fallback weekly JSON (e.g., week_2025_3.json or latest_week.json)"
+        default: "week_2025_3.json"
+        required: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Prepare weekly JSON (create if missing/empty)
+        env:
+          SEASON: ${{ inputs.season }}
+          WEEK:   ${{ inputs.week }}
+          RAW_WEEKLY:      ${{ inputs.raw_weekly_path }}
+          FALLBACK_WEEKLY: ${{ inputs.fallback_weekly_path }}
+        run: |
+          python - <<'PY'
+          import os, os.path, json, gzip, pathlib, sys
+          SEASON=int(os.environ["SEASON"]); WEEK=int(os.environ["WEEK"])
+          RAW=os.environ.get("RAW_WEEKLY","").strip()
+          FALL=os.environ.get("FALLBACK_WEEKLY","").strip()
+          out=f"raw/weekly_usage_{SEASON}_w{WEEK:02}.json"
+          def valid(p):
+            if not p or not os.path.exists(p): return False
+            b=open(p,'rb').read()
+            if not b.strip(): return False
+            if b[:2]==b'\x1f\x8b': import gzip; b=gzip.decompress(b)
+            t=b.decode('utf-8','replace').strip()
+            if not t: return False
+            if t[0] in '[{]': return True
+            for ln in t.splitlines():
+              ln=ln.strip()
+              if ln:
+                try: json.loads(ln); return True
+                except: return False
+            return False
+          cand=[RAW, FALL, f"week_{SEASON}_{WEEK}.json", "latest_week.json"]
+          src=None
+          for p in cand:
+            if valid(p): src=p; break
+          if not src: sys.exit("No valid weekly source found.")
+          if src != out:
+            b=open(src,'rb').read()
+            if b[:2]==b'\x1f\x8b': b=gzip.decompress(b)
+            t=b.decode('utf-8','replace').strip()
+            try: data=json.loads(t)
+            except: data=[json.loads(ln) for ln in t.splitlines() if ln.strip()]
+            pathlib.Path("raw").mkdir(exist_ok=True)
+            open(out,'w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False))
+            print(f"Wrote {out} from {src} with {len(data)} rows")
+          else:
+            print(f"Using existing {out}")
+          PY
 
       - name: Build shards
         env:
-          SEASON: ${{ github.event.inputs.season || '2025' }}
-          WEEK: ${{ github.event.inputs.week || '3' }}
-          RAW_SEASON: ${{ github.event.inputs.raw_season_path || 'raw/season_totals_2025.json' }}
-          RAW_WEEKLY: ${{ github.event.inputs.raw_weekly_path || 'raw/weekly_usage_2025_w03.json' }}
+          SEASON: ${{ inputs.season }}
+          WEEK:   ${{ inputs.week }}
+          RAW_SEASON: ${{ inputs.raw_season_path }}
         run: |
-          python -m pip install --upgrade pip
           python scripts/build_shards.py
 
-      - name: Commit public shards
+      - name: Commit & push public/
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add public/
-          git commit -m "Publish shards: s${{ env.SEASON }} w${{ env.WEEK }}" || echo "No changes"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public
+          git commit -m "Publish shards s${{ inputs.season }} w${{ inputs.week }}" || echo "No changes"
           git push
