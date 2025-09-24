@@ -1,127 +1,66 @@
-#!/usr/bin/env python3
-import json, os, pathlib, sys
-from collections import defaultdict
+# scripts/build_shards.py
+import os, json, gzip, pathlib
 
-# INPUTS: change these to match your raw files
-RAW_SEASON = os.environ.get("RAW_SEASON", "raw/season_totals_2025.json")
-RAW_WEEKLY = os.environ.get("RAW_WEEKLY", "raw/weekly_usage_2025_w03.json")
+def load_any(path):
+    with open(path, "rb") as f: b = f.read()
+    if b[:2] == b"\x1f\x8b": b = gzip.decompress(b)
+    t = b.decode("utf-8", errors="replace").strip()
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        return [json.loads(ln) for ln in t.splitlines() if ln.strip()]
+
 SEASON = int(os.environ.get("SEASON", "2025"))
-WEEK = int(os.environ.get("WEEK", "3"))
+WEEK   = int(os.environ.get("WEEK", "1"))
+RAW_SEASON = os.environ.get("RAW_SEASON", f"raw/season_totals_{SEASON}.json")
+RAW_WEEKLY = os.environ.get("RAW_WEEKLY", f"raw/weekly_usage_{SEASON}_w{WEEK:02}.json")
 
-OUT = pathlib.Path("public")
-OUT_SEASON = OUT / f"s{SEASON}"
-OUT_WEEK = OUT_SEASON / f"w{WEEK:02d}"
-OUT_PLAYERS = OUT / "players"
+season_rows = load_any(RAW_SEASON)
+weekly_rows = load_any(RAW_WEEKLY)
+if not isinstance(season_rows, list): season_rows = [season_rows]
+if not isinstance(weekly_rows, list): weekly_rows = [weekly_rows]
 
-for p in [OUT, OUT_SEASON, OUT_WEEK, OUT_PLAYERS]:
-    p.mkdir(parents=True, exist_ok=True)
+keep_season = ["player_id","player","team","position","games","ffpts","ffpts_per_game"]
+keep_weekly = ["player_id","player","team","position","week",
+               "targets","receptions","rec_yds","rec_td",
+               "rush_att","rush_yds","rush_td",
+               "pass_att","pass_yds","pass_td","int",
+               "routes","snaps","two_pt","fumbles_lost"]
 
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def prune(row, fields): return {k: row.get(k) for k in fields if k in row}
+season_min = [prune(r, keep_season) for r in season_rows]
+weekly_min = [prune(r, keep_weekly) for r in weekly_rows]
 
-def keep_min(row):
-    # only keep fields you actually use downstream (keeps files small)
-    fields = [
-        "player_id","player","team","position",
-        "ffpts_half_ppr","ffpts_per_game",
-        "targets","receptions","rec_yds","rec_td",
-        "rush_att","rush_yds","rush_td",
-        "pass_att","pass_yds","pass_td","int",
-        "routes","snaps","snap_pct","two_pt","fumbles_lost","week"
-    ]
-    out = {}
-    for k in fields:
-        if k in row and row[k] not in (None, ""):
-            out[k] = row[k]
+def split_by_pos(rows):
+    out = {"QB":[], "RB":[], "WR":[], "TE":[]}
+    for r in rows:
+        pos = str(r.get("position","")).upper()
+        if pos in out: out[pos].append(r)
     return out
 
-# Load raw data
-season_rows = load_json(RAW_SEASON)
-weekly_rows = load_json(RAW_WEEKLY)
+pub  = pathlib.Path("public")
+sdir = pub / f"s{SEASON}"
+wdir = sdir / f"w{WEEK:02}"
+wdir.mkdir(parents=True, exist_ok=True)
 
-# Split weekly by position
-pos_order = ["QB","RB","WR","TE"]
-pos_groups_week = {p: [] for p in pos_order}
-for r in weekly_rows:
-    p = r.get("position")
-    if p in pos_groups_week:
-        pos_groups_week[p].append(keep_min(r))
+# season shards
+for pos, rows in split_by_pos(season_min).items():
+    (sdir / f"season_baselines_min_{pos}.json").write_text(
+        json.dumps(rows, ensure_ascii=False))
 
-# Write weekly position shards
-for pos, rows in pos_groups_week.items():
-    (OUT_WEEK / f"weekly_usage_min_{pos}.json").write_text(
-        json.dumps(rows, separators=(",",":")), encoding="utf-8"
-    )
+# weekly shards
+for pos, rows in split_by_pos(weekly_min).items():
+    (wdir / f"weekly_usage_min_{pos}.json").write_text(
+        json.dumps(rows, ensure_ascii=False))
 
-# Split season baselines by position
-pos_groups_season = {p: [] for p in pos_order}
-for r in season_rows:
-    p = r.get("position")
-    if p in pos_groups_season:
-        pos_groups_season[p].append(keep_min(r))
-
-for pos, rows in pos_groups_season.items():
-    (OUT_SEASON / f"season_baselines_min_{pos}.json").write_text(
-        json.dumps(rows, separators=(",",":")), encoding="utf-8"
-    )
-
-# Build per-player shards + name index
-def norm(name):
-    return name.lower().replace(".","").replace("'","").strip()
-
-players_index = {}
-season_by_id = {}
-weekly_by_id = defaultdict(list)
-
-for r in season_rows:
-    pid = r.get("player_id")
-    if pid:
-        season_by_id[pid] = keep_min(r)
-    name = r.get("player")
-    if pid and name:
-        players_index[norm(name)] = pid
-
-for r in weekly_rows:
-    pid = r.get("player_id")
-    if pid:
-        weekly_by_id[pid].append(keep_min(r))
-
-for pid, srow in season_by_id.items():
-    d = OUT_PLAYERS / pid
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "season_min.json").write_text(json.dumps(srow, separators=(",",":")), encoding="utf-8")
-    for wrow in weekly_by_id.get(pid, []):
-        wk = wrow.get("week")
-        if wk:
-            (d / f"w{wk:02d}_min.json").write_text(json.dumps(wrow, separators=(",",":")), encoding="utf-8")
-
-# Write players index
-(OUT_PLAYERS / "index_min.json").write_text(
-    json.dumps(players_index, separators=(",",":")), encoding="utf-8"
-)
-
-# meta.json
-(OUT / "meta.json").write_text(
-    json.dumps({"season": SEASON, "week": WEEK}, separators=(",",":")), encoding="utf-8"
-)
-
-# manifest.json with sizes
-def fsize(p): return os.path.getsize(p)
+# meta + manifest
+(pub / "meta.json").write_text(json.dumps({"season": SEASON, "week": WEEK}))
 manifest = {
-  "season": SEASON,
-  "week": WEEK,
-  "shards": {
-    "season_min": {pos: {
-        "url": f"/s{SEASON}/season_baselines_min_{pos}.json",
-        "bytes": fsize(OUT_SEASON / f"season_baselines_min_{pos}.json")
-      } for pos in pos_order},
-    "weekly_min": {f"w{WEEK:02d}": {pos: {
-        "url": f"/s{SEASON}/w{WEEK:02d}/weekly_usage_min_{pos}.json",
-        "bytes": fsize(OUT_WEEK / f"weekly_usage_min_{pos}.json")
-      } for pos in pos_order}}
+  "season": SEASON, "week": WEEK,
+  "paths": {
+    "season": {p: f"s{SEASON}/season_baselines_min_{p}.json" for p in ["QB","RB","WR","TE"]},
+    "weekly": {p: f"s{SEASON}/w{WEEK:02}/weekly_usage_min_{p}.json" for p in ["QB","RB","WR","TE"]}
   }
 }
-(OUT / "manifest.json").write_text(json.dumps(manifest, separators=(",",":")), encoding="utf-8")
-
-print("Shards built under /public/")
+(pub / "manifest.json").write_text(json.dumps(manifest))
+print("Shards written → public/")
