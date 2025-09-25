@@ -1,88 +1,177 @@
-name: Build & Publish Shards
+name: Publish shards
 
 on:
   workflow_dispatch:
     inputs:
-      season:  { description: "Season", default: "2025", required: true }
-      week:    { description: "Week (e.g., 3)", default: "3", required: true }
-      raw_season_path:
-        description: "Path to season totals JSON"
-        default: "raw/season_totals_2025.json"
+      season:
+        description: "NFL season (YYYY)"
         required: true
-      raw_weekly_path:
-        description: "Weekly usage JSON (leave blank to auto-create)"
-        default: ""
-        required: false
-      fallback_weekly_path:
-        description: "Fallback weekly JSON (e.g., week_2025_3.json or latest_week.json)"
-        default: "week_2025_3.json"
-        required: false
+        default: "2025"
+      week:
+        description: "NFL week (1-18, w03, 03 all OK)"
+        required: true
+        default: "3"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-shards-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Prepare weekly JSON (create if missing/empty)
-        env:
-          SEASON: ${{ inputs.season }}
-          WEEK:   ${{ inputs.week }}
-          RAW_WEEKLY:      ${{ inputs.raw_weekly_path }}
-          FALLBACK_WEEKLY: ${{ inputs.fallback_weekly_path }}
+      - name: Normalize inputs (season/week) & ensure dirs
+        id: norm
+        shell: bash
         run: |
-          python - <<'PY'
-          import os, os.path, json, gzip, pathlib, sys
-          SEASON=int(os.environ["SEASON"]); WEEK=int(os.environ["WEEK"])
-          RAW=os.environ.get("RAW_WEEKLY","").strip()
-          FALL=os.environ.get("FALLBACK_WEEKLY","").strip()
-          out=f"raw/weekly_usage_{SEASON}_w{WEEK:02}.json"
-          def valid(p):
-            if not p or not os.path.exists(p): return False
-            b=open(p,'rb').read()
-            if not b.strip(): return False
-            if b[:2]==b'\x1f\x8b': import gzip; b=gzip.decompress(b)
-            t=b.decode('utf-8','replace').strip()
-            if not t: return False
-            if t[0] in '[{]': return True
-            for ln in t.splitlines():
-              ln=ln.strip()
-              if ln:
-                try: json.loads(ln); return True
-                except: return False
-            return False
-          cand=[RAW, FALL, f"week_{SEASON}_{WEEK}.json", "latest_week.json"]
-          src=None
-          for p in cand:
-            if valid(p): src=p; break
-          if not src: sys.exit("No valid weekly source found.")
-          if src != out:
-            b=open(src,'rb').read()
-            if b[:2]==b'\x1f\x8b': b=gzip.decompress(b)
-            t=b.decode('utf-8','replace').strip()
-            try: data=json.loads(t)
-            except: data=[json.loads(ln) for ln in t.splitlines() if ln.strip()]
-            pathlib.Path("raw").mkdir(exist_ok=True)
-            open(out,'w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False))
-            print(f"Wrote {out} from {src} with {len(data)} rows")
-          else:
-            print(f"Using existing {out}")
-          PY
+          set -euo pipefail
+          SEASON_IN="${{ github.event.inputs.season }}"
+          WEEK_IN="${{ github.event.inputs.week }}"
 
-      - name: Build shards
-        env:
-          SEASON: ${{ inputs.season }}
-          WEEK:   ${{ inputs.week }}
-          RAW_SEASON: ${{ inputs.raw_season_path }}
-        run: |
-          python scripts/build_shards.py
+          # strip w/W + leading zeros → number
+          WEEK_NUM="$(echo "$WEEK_IN" | sed -E 's/^[wW]//; s/^0*//')"
+          if [[ -z "$WEEK_NUM" ]]; then
+            echo "Week resolved to empty; defaulting to 0" >&2
+            WEEK_NUM="0"
+          fi
+          WEEK_DIR="$(printf 'w%02d' "$WEEK_NUM")"
 
-      - name: Commit & push public/
+          echo "season=$SEASON_IN"   >> "$GITHUB_OUTPUT"
+          echo "week_num=$WEEK_NUM" >> "$GITHUB_OUTPUT"
+          echo "week_dir=$WEEK_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "SEASON=$SEASON_IN"      >> "$GITHUB_ENV"
+          echo "WEEK=$WEEK_NUM"         >> "$GITHUB_ENV"
+          echo "WEEK_DIR=$WEEK_DIR"     >> "$GITHUB_ENV"
+          echo "DEST=public/s${SEASON_IN}/${WEEK_DIR}" >> "$GITHUB_ENV"
+
+          # expected raw file names (optional—only if you build from raw)
+          echo "RAW_WEEK_FILE=raw/weekly_usage_${SEASON_IN}_${WEEK_DIR}.json"  >> "$GITHUB_ENV"
+          echo "RAW_SEASON_FILE=raw/season_totals_${SEASON_IN}.json"           >> "$GITHUB_ENV"
+
+          mkdir -p "public/s${SEASON_IN}/${WEEK_DIR}" players raw
+
+      - name: Show current tree
+        shell: bash
         run: |
+          echo "== raw =="
+          ls -la raw || true
+          echo "== public =="
+          find public -maxdepth 3 -type f | sort || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          else
+            pip install "polars>=0.20" pyarrow
+          fi
+
+      - name: Build shards (if script exists)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SEASON=$SEASON  WEEK=$WEEK  WEEK_DIR=$WEEK_DIR"
+          echo "DEST=$DEST"
+          if [[ -f scripts/build_shards.py ]]; then
+            echo "Running scripts/build_shards.py …"
+            python scripts/build_shards.py \
+              --season "$SEASON" \
+              --week "$WEEK" \
+              --raw-season "$RAW_SEASON_FILE" \
+              --raw-week "$RAW_WEEK_FILE" \
+              --out "$DEST" \
+              --players-out "public/players/index.json"
+          else
+            echo "No scripts/build_shards.py found — skipping shard build step."
+          fi
+
+      - name: Write meta.json & manifest.json (idempotent)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ts="$(date -u +%FT%TZ)"
+
+          cat > "$DEST/meta.json" <<EOF
+          {
+            "season": "s$SEASON",
+            "week": "$WEEK_DIR",
+            "created_at": "$ts"
+          }
+          EOF
+
+          # The shard filenames are the convention we're writing to public/sYYYY/wXX/
+          cat > "$DEST/manifest.json" <<'EOF'
+          {
+            "weekly_usage_min": {
+              "QB": "weekly_usage_min_QB.json",
+              "RB": "weekly_usage_min_RB.json",
+              "TE": "weekly_usage_min_TE.json",
+              "WR": "weekly_usage_min_WR.json"
+            },
+            "season_baselines_min": {
+              "QB": "season_baselines_min_QB.json",
+              "RB": "season_baselines_min_RB.json",
+              "TE": "season_baselines_min_TE.json",
+              "WR": "season_baselines_min_WR.json"
+            },
+            "players_index": "../../players/index.json"
+          }
+          EOF
+
+          echo "== Wrote meta/manifest to $DEST =="
+          ls -la "$DEST"
+
+      # ---- Promote season-root meta/manifest for easy access: /public/sYYYY/meta.json & manifest.json
+      - name: Promote meta/manifest to season root
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$DEST"
+          DEST_SEASON="public/s${SEASON}"
+
+          test -f "$SRC/meta.json"
+          test -f "$SRC/manifest.json"
+
+          mkdir -p "$DEST_SEASON"
+          cp -f "$SRC/meta.json"     "$DEST_SEASON/meta.json"
+          cp -f "$SRC/manifest.json" "$DEST_SEASON/manifest.json"
+
+          # Optionally annotate season-root meta with latest_week (use jq if available)
+          if command -v jq >/dev/null 2>&1; then
+            jq --arg latest "$WEEK_DIR" '. + {latest_week: $latest}' \
+              "$DEST_SEASON/meta.json" > "$DEST_SEASON/.meta.tmp" && mv "$DEST_SEASON/.meta.tmp" "$DEST_SEASON/meta.json"
+          fi
+
+          echo "== Promoted to $DEST_SEASON =="
+          ls -la "$DEST_SEASON"
+
+      - name: Commit & push
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public
-          git commit -m "Publish shards s${{ inputs.season }} w${{ inputs.week }}" || echo "No changes"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add public/s${SEASON}/${WEEK_DIR}/* || true
+          git add public/s${SEASON}/meta.json public/s${SEASON}/manifest.json || true
+          git add public/players/index.json || true
+
+          git commit -m "Publish shards s${SEASON} ${WEEK_DIR} (meta/manifest promoted)" || echo "No changes to commit"
           git push
