@@ -1,173 +1,35 @@
-name: Build players index
+name: Build weekly player feed
 
 on:
-  workflow_dispatch: {}
-  push:
-    branches: [ main ]
-    paths:
-      - 'public/s*/w*/weekly_usage_min_*.json'
-      - 'public/s*/w*/season_baselines_min_*.json'
+  schedule:
+    - cron: "0 10 * * 1"   # Mondays 10:00 UTC (~6:00 AM ET) — adjust if you like
+  workflow_dispatch: {}     # allows manual run from the Actions tab
 
 permissions:
   contents: write
 
-concurrency:
-  group: build-players-index-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  build-index:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: "3.11"
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Build players index from latest shards
-        id: build
-        shell: bash
+      - name: Install deps
         run: |
-          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          python - << 'PY'
-          import os, re, json, glob, sys
-          from pathlib import Path
-
-          BASE = Path("public")
-          POSITIONS = ["QB","RB","WR","TE"]
-
-          def list_dirs(pattern):
-            return sorted([Path(p) for p in glob.glob(pattern) if os.path.isdir(p)])
-
-          def latest_season_week(base: Path):
-            seasons = list_dirs(str(base / "s[0-9][0-9][0-9][0-9]"))
-            if not seasons:
-              print("No seasons found under public/", file=sys.stderr); sys.exit(1)
-            season_dir = seasons[-1]
-            weeks = list_dirs(str(season_dir / "w[0-9][0-9]"))
-            if not weeks:
-              print(f"No week folders under {season_dir}", file=sys.stderr); sys.exit(1)
-            return season_dir, weeks[-1]
-
-          def load_json(path: Path):
-            if not path.exists():
-              return None
-            with path.open("r", encoding="utf-8") as f:
-              try:
-                return json.load(f)
-              except Exception as e:
-                print(f"Failed to parse JSON: {path}: {e}", file=sys.stderr)
-                return None
-
-          def make_key(row):
-            pid = row.get("player_id")
-            if pid and isinstance(pid, str):
-              return f"id::{pid}"
-            name = (row.get("full_name") or "").strip().lower()
-            team = (row.get("team") or "").strip().upper()
-            pos  = (row.get("position") or "").strip().upper()
-            return f"ntp::{name}::{team}::{pos}"
-
-          def pick(d, keys):
-            return {k: d.get(k) for k in keys if k in d}
-
-          # 1) Find latest season/week
-          season_dir, week_dir = latest_season_week(BASE)
-          season_str = season_dir.name   # e.g. s2025
-          week_str   = week_dir.name     # e.g. w03
-
-          # 2) Load shards
-          baseline_rows, weekly_rows = {}, {}
-
-          for pos in POSITIONS:
-            bpath = week_dir / f"season_baselines_min_{pos}.json"
-            wpath = week_dir / f"weekly_usage_min_{pos}.json"
-
-            bdata = load_json(bpath) or []
-            wdata = load_json(wpath) or []
-
-            if not isinstance(bdata, list):
-              print(f"Baseline shard not a list: {bpath}", file=sys.stderr); bdata=[]
-            if not isinstance(wdata, list):
-              print(f"Weekly shard not a list: {wpath}", file=sys.stderr); wdata=[]
-
-            for row in bdata:
-              k = make_key(row)
-              baseline_rows[k] = row
-
-            for row in wdata:
-              k = make_key(row)
-              weekly_rows[k] = row
-
-          # 3) Merge into index
-          keys = set(baseline_rows.keys()) | set(weekly_rows.keys())
-          out = []
-          for k in sorted(keys):
-            b = baseline_rows.get(k, {})
-            w = weekly_rows.get(k, {})
-            # Prefer identity from either
-            full_name = (w.get("full_name") or b.get("full_name") or "").strip()
-            team      = (w.get("team") or b.get("team") or "").strip().upper()
-            position  = (w.get("position") or b.get("position") or "").strip().upper()
-            player_id = w.get("player_id") or b.get("player_id")
-
-            # Last-week subset (keep it light)
-            last_week_fields = [
-              "targets","receptions","carries","routes","snaps",
-              "pass_yds","rush_yds","rec_yds",
-              "pass_td","rush_td","rec_td","int","fumbles_lost","two_pt"
-            ]
-            last_week = {k2: w.get(k2) for k2 in last_week_fields if k2 in w}
-
-            # Baseline subset
-            baseline = {k2: b.get(k2) for k2 in ["games","ffpts_per_game","ffpts_total"] if k2 in b}
-
-            entry = {
-              "key": k,
-              "player_id": player_id,
-              "full_name": full_name,
-              "team": team,
-              "position": position,
-              "season": season_str,       # e.g. "s2025"
-              "latest_week": week_str,    # e.g. "w03"
-              "baseline": baseline,
-              "last_week": last_week,
-              "sources": {
-                "weekly_path": f"{week_dir}/weekly_usage_min_{position}.json",
-                "baseline_path": f"{week_dir}/season_baselines_min_{position}.json"
-              }
-            }
-            out.append(entry)
-
-          # 4) Write outputs
-          players_dir = BASE / "players"
-          players_dir.mkdir(parents=True, exist_ok=True)
-
-          # Main index
-          idx_path = players_dir / "index.json"
-          with idx_path.open("w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, separators=(",",":"))
-
-          # Versioned copy
-          idx_ver = players_dir / f"index_{season_str}_latest.json"
-          with idx_ver.open("w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, separators=(",",":"))
-
-          print(f"Wrote {idx_path} and {idx_ver} with {len(out)} players for {season_str}/{week_str}")
-          PY
-
-      - name: Commit & push players index
-        shell: bash
+      - name: Build latest week files
+        run: python build_week.py
+        
+      - name: Commit & push
         run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/players/index*.json || true
-          git commit -m "Build players index from latest shards" || echo "No changes to commit"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add latest_week.json meta.json week_*.json season_totals.json season_top10.json || true
+          git commit -m "Update weekly & season feeds" || echo "Nothing to commit"
           git push
