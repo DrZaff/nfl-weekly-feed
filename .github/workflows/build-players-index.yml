@@ -1,0 +1,35 @@
+name: Build players index (Top 200)
+
+on:
+  workflow_dispatch: {}   # manual "Run workflow" button
+  push:
+    paths:
+      - "public/meta.json"
+      - "public/s*/season_baselines_min_*.json"
+      - "scripts/build_players_index.py"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # allow the bot to push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build index
+        run: |
+          python scripts/build_players_index.py --top 200
+
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/players/index.json
+          git commit -m "Update players/index.json (Top 200 from season baselines)" || echo "No changes"
+          git push
