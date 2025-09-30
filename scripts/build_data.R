@@ -99,4 +99,3 @@ dir.create(latest_dir, recursive = TRUE, showWarnings = FALSE)
 file.copy(file.path(wdir, "players_week_min.csv"),  file.path(latest_dir, "players_week_min.csv"), overwrite = TRUE)
 file.copy(file.path(wdir, "players_week_min.json"), file.path(latest_dir, "players_week_min.json"), overwrite = TRUE)
 file.copy(file.path(wdir, "meta.json"),             file.path(latest_dir, "meta.json"), overwrite = TRUE)
-
